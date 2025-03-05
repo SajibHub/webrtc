@@ -6,7 +6,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_URL || '*', // Set to your frontend URL in production
+    origin: process.env.CLIENT_URL || '*', // Update to your frontend URL after deployment
     methods: ['GET', 'POST'],
   },
 });
