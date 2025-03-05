@@ -6,10 +6,10 @@
         "use": "@vercel/react"
       }
     ],
-    "routes": [
+    "rewrites": [
       {
-        "src": "/(.*)",
-        "dest": "/$1"
+        "source": "/(.*)",
+        "destination": "/$1"
       }
     ]
   }
