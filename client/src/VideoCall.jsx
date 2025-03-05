@@ -4,7 +4,6 @@ import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
 const generateNewUserId = () => {
-  localStorage.removeItem('userId');
   const userId = 'user-' + Math.random().toString(36).substr(2, 9);
   localStorage.setItem('userId', userId);
   return userId;
@@ -15,7 +14,7 @@ const VideoCall = () => {
   const remoteVideoRef = useRef(null);
   const [peerConnection, setPeerConnection] = useState(null);
   const [socket, setSocket] = useState(null);
-  const [room] = useState('test-room');
+  const [room] = useState('bd-us-room'); // Unique room for Bangladesh-to-US calls
   const [users, setUsers] = useState([]);
   const [connectedUsers, setConnectedUsers] = useState([]);
   const [myId] = useState(generateNewUserId());
@@ -25,17 +24,21 @@ const VideoCall = () => {
   const [incomingCall, setIncomingCall] = useState(null);
 
   useEffect(() => {
-    const newSocket = io(import.meta.env.VITE_API_URL, {
-      reconnection: false,
+    // Replace with your deployed server URL
+    const serverUrl = import.meta.env.VITE_API_URL || 'https://your-app-name.herokuapp.com';
+    const newSocket = io(serverUrl, {
       transports: ['websocket'],
+      secure: true,
+      reconnection: true,
     });
     setSocket(newSocket);
 
     const pc = new RTCPeerConnection({
       iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun.l.google.com:19302' }, // Free STUN server
+        { urls: 'stun:stun1.l.google.com:19302' }, // Additional STUN server
         {
-          urls: 'turn:openrelay.metered.ca:80',
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp', // TURN with TCP for better NAT traversal
           username: 'openrelayproject',
           credential: 'openrelayproject',
         },
@@ -43,30 +46,33 @@ const VideoCall = () => {
     });
     setPeerConnection(pc);
 
-    let localStream;
     navigator.mediaDevices
       .getUserMedia({ video: true, audio: true })
       .then((stream) => {
-        localStream = stream;
         localVideoRef.current.srcObject = stream;
-        stream.getTracks().forEach((track) => {
-          console.log(`Adding track: ${track.kind}`);
-          pc.addTrack(track, stream);
-        });
+        stream.getTracks().forEach((track) => pc.addTrack(track, stream));
       })
-      .catch((err) => {
-        console.error('Error accessing media devices:', err);
-        toast.error('Failed to access camera/microphone');
-      });
+      .catch((err) => toast.error('Camera/microphone access failed: ' + err.message));
+
+    pc.ontrack = (event) => {
+      remoteVideoRef.current.srcObject = event.streams[0];
+      setCallStatus('Connected');
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && remoteVideoRef.current?.peerId) {
+        newSocket.emit('ice-candidate', {
+          candidate: event.candidate,
+          to: remoteVideoRef.current.peerId,
+        });
+      }
+    };
 
     pc.onconnectionstatechange = () => {
       console.log('Connection state:', pc.connectionState);
-      if (pc.connectionState === 'connected') {
-        console.log('WebRTC connection established');
-      } else if (pc.connectionState === 'failed') {
-        console.error('WebRTC connection failed');
+      if (pc.connectionState === 'failed') {
         setCallStatus('Idle');
-        toast.error('Failed to establish connection');
+        toast.error('Call connection failed');
       }
     };
 
@@ -75,197 +81,112 @@ const VideoCall = () => {
       if (inRoom) newSocket.emit('join', { room, userId: myId });
     });
 
-    newSocket.on('connect_error', (error) => {
-      console.error('Socket connect error:', error);
-      toast.error('Failed to connect to server');
-    });
-
-    newSocket.on('new-user-joined', (data) => {
-      toast.info(`New user joined: ${data.userId}`);
-    });
-
+    newSocket.on('connect_error', (error) => toast.error('Server connection failed: ' + error.message));
+    newSocket.on('new-user-joined', (data) => toast.info(`${data.userId} joined the room`));
     newSocket.on('connected-users', setConnectedUsers);
-    newSocket.on('room-users', (userData) => {
-      console.log('Room users:', userData);
-      setUsers(userData.filter((entry) => entry.userId !== myId));
-    });
-
+    newSocket.on('room-users', (userData) => setUsers(userData.filter((u) => u.userId !== myId)));
     newSocket.on('offer', (data) => {
-      console.log(`Offer received from ${data.from}`, data);
-      setCallStatus('Receiving Offer');
       setIncomingCall(data);
+      setCallStatus('Receiving Offer');
     });
-
     newSocket.on('answer', (answer) => {
-      console.log('Answer received:', answer);
-      pc.setRemoteDescription(new RTCSessionDescription(answer))
-        .then(() => {
-          console.log('Remote description set, call connected');
-          setCallStatus('Connected');
-        })
-        .catch((err) => {
-          console.error('Error setting remote description:', err);
-          setCallStatus('Idle');
-          toast.error('Failed to set remote description');
-        });
+      pc.setRemoteDescription(new RTCSessionDescription(answer));
+      setCallStatus('Connected');
     });
-
-    newSocket.on('ice-candidate', (candidate) => {
-      console.log('ICE candidate received:', candidate);
-      pc.addIceCandidate(new RTCIceCandidate(candidate))
-        .catch((err) => console.error('Error adding ICE candidate:', err));
-    });
-
+    newSocket.on('ice-candidate', (candidate) => pc.addIceCandidate(new RTCIceCandidate(candidate)));
     newSocket.on('call-declined', () => {
       setCallStatus('Idle');
       setIncomingCall(null);
-      toast.error('Call declined by other user');
+      toast.error('Call declined');
     });
-
     newSocket.on('call-failed', (data) => {
       setCallStatus('Idle');
-      setIncomingCall(null);
       toast.error(data.reason);
     });
-
     newSocket.on('user-disconnected', (userId) => {
       if (remoteVideoRef.current?.peerId === userId) {
         remoteVideoRef.current.srcObject = null;
         setCallStatus('Idle');
       }
-      if (inRoom) newSocket.emit('join', { room, userId: myId });
     });
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate && remoteVideoRef.current?.peerId) {
-        console.log('Sending ICE candidate to:', remoteVideoRef.current.peerId);
-        newSocket.emit('ice-candidate', {
-          candidate: event.candidate,
-          to: remoteVideoRef.current.peerId,
-        });
-      }
-    };
-
-    pc.ontrack = (event) => {
-      console.log('Remote track received:', event);
-      remoteVideoRef.current.srcObject = event.streams[0];
-      setCallStatus('Connected');
-    };
-
     return () => {
-      if (localStream) localStream.getTracks().forEach((track) => track.stop());
-      if (pc) pc.close();
-      if (newSocket) newSocket.disconnect();
+      if (localVideoRef.current?.srcObject) {
+        localVideoRef.current.srcObject.getTracks().forEach((track) => track.stop());
+      }
+      pc.close();
+      newSocket.disconnect();
     };
   }, [room, myId, inRoom]);
 
   const createOffer = async (targetUserId) => {
-    if (!peerConnection || !socket) return;
     setCallStatus('Offering');
-    console.log(`Creating offer for ${targetUserId}`);
     try {
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       socket.emit('offer', { offer, to: targetUserId, from: myId });
       remoteVideoRef.current.peerId = targetUserId;
     } catch (err) {
-      console.error('Error creating offer:', err);
       setCallStatus('Idle');
-      toast.error('Failed to create offer');
+      toast.error('Failed to create offer: ' + err.message);
     }
   };
 
-  const handleOffer = async (pc, offer, from, socket) => {
+  const acceptCall = async () => {
+    if (!incomingCall) return;
     try {
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit('answer', { answer, from: myId, to: from });
-      console.log(`Answer sent to ${from}`);
-      remoteVideoRef.current.peerId = from;
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      socket.emit('answer', { answer, to: incomingCall.from });
+      remoteVideoRef.current.peerId = incomingCall.from;
+      setIncomingCall(null);
       setCallStatus('Connected');
     } catch (err) {
-      console.error('Error handling offer:', err);
       setCallStatus('Idle');
-      toast.error('Failed to handle offer');
-    }
-  };
-
-  const acceptCall = () => {
-    if (incomingCall && peerConnection && socket) {
-      handleOffer(peerConnection, incomingCall.offer, incomingCall.from, socket);
-      setIncomingCall(null);
-      setCallStatus('Answering');
+      toast.error('Failed to accept call: ' + err.message);
     }
   };
 
   const declineCall = () => {
-    if (incomingCall && socket) {
-      setCallStatus('Idle');
-      socket.emit('call-declined', { to: incomingCall.from });
-      setIncomingCall(null);
-    }
+    socket.emit('call-declined', { to: incomingCall.from });
+    setIncomingCall(null);
+    setCallStatus('Idle');
   };
 
   const leaveRoom = () => {
-    if (localVideoRef.current?.srcObject) {
-      localVideoRef.current.srcObject.getTracks().forEach((track) => track.stop());
-      localVideoRef.current.srcObject = null;
-    }
-    if (socket) socket.emit('leave', { room, userId: myId });
+    socket.emit('leave', { room, userId: myId });
     setInRoom(false);
     setUsers([]);
     setCallStatus('Idle');
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = null;
-      remoteVideoRef.current.peerId = null;
-    }
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
   };
 
   const joinRoom = () => {
-    if (socket) socket.emit('join', { room, userId: myId });
+    socket.emit('join', { room, userId: myId });
     setInRoom(true);
   };
 
   return (
     <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-      <h1 style={{ textAlign: 'center' }}>WebRTC Video Call</h1>
-      <div style={{ display: 'flex', gap: '20px', justifyContent: 'center' }}>
+      <h1>Bangladesh to US Video Call</h1>
+      <div style={{ display: 'flex', gap: '20px' }}>
         <div>
-          <h3>Local Video</h3>
+          <h3>Local Video (You)</h3>
           <video ref={localVideoRef} autoPlay muted style={{ width: '300px', border: '1px solid #ccc' }} />
         </div>
         <div>
-          <h3>Remote Video</h3>
+          <h3>Remote Video (Friend)</h3>
           <video ref={remoteVideoRef} autoPlay style={{ width: '300px', border: '1px solid #ccc' }} />
         </div>
       </div>
       <h2>Call Status: {callStatus}</h2>
       {incomingCall && (
-        <div style={{ marginTop: '20px' }}>
+        <div>
           <p>Incoming call from {incomingCall.from}</p>
-          <button onClick={acceptCall} style={{ marginRight: '10px' }}>
-            Accept
-          </button>
-          <button onClick={declineCall}>
-            Decline
-          </button>
+          <button onClick={acceptCall} style={{ marginRight: '10px' }}>Accept</button>
+          <button onClick={declineCall}>Decline</button>
         </div>
-      )}
-      {!incomingCall && callStatus === 'Receiving Offer' && (
-        <p>DEBUG: Expected incoming call, but none found. Check state.</p>
-      )}
-      <h2>Currently Connected Users</h2>
-      {connectedUsers.length > 0 ? (
-        <ul>
-          {connectedUsers.map((entry) => (
-            <li key={entry.userId}>
-              {entry.userId} (Socket ID: {entry.socketId || 'Unknown'})
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p>No users currently connected.</p>
       )}
       <h2>Users in Room</h2>
       {inRoom ? (
@@ -274,11 +195,11 @@ const VideoCall = () => {
             <ul>
               {users.map((entry) => (
                 <li key={entry.userId}>
-                  {entry.userId} (Socket ID: {entry.socketId || 'Unknown'})
+                  {entry.userId}
                   <button
                     onClick={() => createOffer(entry.userId)}
-                    disabled={callStatus !== 'Idle' || !socket}
-                    style={{ marginLeft: '10px', padding: '5px 10px' }}
+                    disabled={callStatus !== 'Idle'}
+                    style={{ marginLeft: '10px' }}
                   >
                     Call
                   </button>
@@ -286,18 +207,14 @@ const VideoCall = () => {
               ))}
             </ul>
           ) : (
-            <p>No other users in the room.</p>
+            <p>Waiting for someone to join...</p>
           )}
-          <button onClick={leaveRoom} style={{ padding: '5px 10px' }}>
-            Leave Room
-          </button>
+          <button onClick={leaveRoom}>Leave Room</button>
         </>
       ) : (
-        <button onClick={joinRoom} disabled={!socket} style={{ padding: '5px 10px' }}>
-          Join Room
-        </button>
+        <button onClick={joinRoom}>Join Room</button>
       )}
-      <p>Your ID: {myId} (Socket ID: {mySocketId || 'Connecting...'})</p>
+      <p>Your ID: {myId} (Socket: {mySocketId || 'Connecting...'})</p>
       <ToastContainer />
     </div>
   );
